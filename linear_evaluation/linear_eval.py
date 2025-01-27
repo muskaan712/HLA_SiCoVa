@@ -1,68 +1,59 @@
+import os
+import glob
+import time
+import warnings
+
+import numpy as np
+import pandas as pd
+from pandas import DataFrame
+
 import torch
 import torch.nn as nn
-import torchvision
 import torch.nn.functional as F
-import torchvision.transforms as tr
 import torch.optim as optim
-from tqdm import tqdm
-from torch.utils.data import (
-    Dataset,
-    DataLoader,
-)
+
+import torchvision
+import torchvision.models as models
 from torchvision.datasets import ImageFolder
 from torchvision.transforms import (
+    Compose,
     RandomResizedCrop,
     RandomHorizontalFlip,
-    RandomVerticalFlip,
-    ColorJitter,
-    RandomGrayscale,
-    RandomApply,
-    Compose,
-    GaussianBlur,
+    CenterCrop,
+    RandomCrop,
     Resize,
     ToTensor,
+    ColorJitter,
+    RandomGrayscale,
+    RandomVerticalFlip,
+    RandomApply,
+    GaussianBlur,
     RandomRotation,
     RandomAffine,
     Normalize,
     functional
 )
-import torchvision.models as models
-import warnings
-warnings.filterwarnings('ignore')
-import os
-import glob
-import time
-from skimage import io
-import matplotlib.pyplot as plt
-from PIL import Image
-import numpy as np
-#import albumentations as A
-from torchvision.transforms import (
-    RandomCrop,
-    Resize,
-    CenterCrop)
-import pandas as pd
-from pandas import DataFrame
+
+from tqdm import tqdm
+from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, classification_report, cohen_kappa_score
 
+# import albumentations as A  # Uncomment if needed.
 
-print(f'Torch-Version {torch.__version__}')
+warnings.filterwarnings('ignore')
+
+print(f"Torch-Version {torch.__version__}")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f'DEVICE: {DEVICE}')
+print(f"DEVICE: {DEVICE}")
 
 
+# -------------------------------------------------------------------------
+# Transforms (train and validation)
+# -------------------------------------------------------------------------
 r_crop = RandomResizedCrop(224)
 r_fliph = RandomHorizontalFlip()
-# ccrop = CenterCrop(224)
-ttensor = ToTensor()
-
-# transforms train
-
-r_crop = RandomResizedCrop(224)
-r_fliph = RandomHorizontalFlip()
-# ccrop = CenterCrop(224)
 ttensor = ToTensor()
 
 custom_transform_train = Compose([
@@ -71,11 +62,8 @@ custom_transform_train = Compose([
     ttensor,
 ])
 
-# transforms val
-
 resize = Resize(256)
 ccrop = CenterCrop(224)
-# ccrop = CenterCrop(224)
 ttensor = ToTensor()
 
 custom_transform_val = Compose([
@@ -84,52 +72,41 @@ custom_transform_val = Compose([
     ttensor,
 ])
 
+
+# -------------------------------------------------------------------------
+# Datasets and Dataloaders
+# -------------------------------------------------------------------------
+"""
+Using ImageFolder for training and validation. Adjust root paths as needed.
+"""
+
 train2_ds = ImageFolder(
     root="/home/s13mchop/HybridML/data/aptos/train",
     transform=custom_transform_train
 )
-len(train2_ds)
+print(f"Number of training samples: {len(train2_ds)}")
 
 valid2_ds = ImageFolder(
     root="/home/s13mchop/HybridML/data/aptos/test",
     transform=custom_transform_val
 )
-len(valid2_ds)
-
-# Use only 10% of the original dataset
-# train_size = int(0.5 * len(train2_ds))
-# valid_size = int(0.5 * len(valid2_ds))
-
-# # Split the dataset
-# train2_ds, _ = torch.utils.data.random_split(train2_ds, [train_size, len(train2_ds) - train_size])
-# valid2_ds, _ = torch.utils.data.random_split(valid2_ds, [valid_size, len(valid2_ds) - valid_size])
-
+print(f"Number of validation samples: {len(valid2_ds)}")
 
 nu_classes = 5
-
 BATCH_SIZE = 256
 
-# train_size = int(0.8 * len(ds))
-# valid_size = len(ds) - train_size
-# train_ds, valid_ds = torch.utils.data.random_split(ds, [train_size, valid_size])
-
-# print(len(train_ds))
-# print(len(valid_ds))
-
-# Building the data loader
-train_dl = torch.utils.data.DataLoader(
+train_dl = DataLoader(
     train2_ds,
-
-    batch_size=256,
+    batch_size=BATCH_SIZE,
     shuffle=True,
     num_workers=os.cpu_count(),
     drop_last=True,
     pin_memory=True,
 )
 
-valid_dl = torch.utils.data.DataLoader(
+valid_dl = DataLoader(
     valid2_ds,
-    batch_size=256,
+    batch_size=BATCH_SIZE,
     shuffle=True,
     num_workers=os.cpu_count(),
     drop_last=True,
@@ -137,12 +114,28 @@ valid_dl = torch.utils.data.DataLoader(
 )
 
 
-class VICRegNet(nn.Module):
+# -------------------------------------------------------------------------
+# SiCoVa
+# -------------------------------------------------------------------------
+class SiCoVaNet(nn.Module):
+    """
+    A neural network that implements SiCoVa with a ResNet50 encoder and an MLP expander.
+    Primarily used for self-supervised pretraining before linear evaluation.
+    """
+
     def __init__(self):
+        """
+        Initializes the SiCoVaNet with a pretrained ResNet50 backbone truncated 
+        before the final fully connected layer, followed by a flatten operation and 
+        an MLP expansion.
+        """
         super().__init__()
         self.encoder = models.resnet50(pretrained=True)
-        self.encoder = torch.nn.Sequential(*(list(self.encoder.children())[:-1]),
-                                           nn.Flatten())
+        # Truncate the final layer and add flatten
+        self.encoder = nn.Sequential(
+            *(list(self.encoder.children())[:-1]),
+            nn.Flatten()
+        )
         self.expander = nn.Sequential(
             nn.Linear(2048, 8192),
             nn.BatchNorm1d(8192),
@@ -150,185 +143,269 @@ class VICRegNet(nn.Module):
             nn.Linear(8192, 8192),
             nn.BatchNorm1d(8192),
             nn.ReLU(),
-            nn.Linear(8192, 8192))
+            nn.Linear(8192, 8192)
+        )
 
     def forward(self, x):
+        """
+        Forward pass through the truncated ResNet50 and the MLP expander.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, 3, height, width].
+
+        Returns:
+            torch.Tensor: The expanded embedding of shape [batch_size, 8192].
+        """
         _repr = self.encoder(x)
         _embeds = self.expander(_repr)
         return _embeds
 
 
+# -------------------------------------------------------------------------
+# Identity Layer
+# -------------------------------------------------------------------------
 class Identity(nn.Module):
+    """
+    An identity layer that simply returns its input. Useful for 
+    replacing parts of a network architecture (e.g., projector) 
+    that are not needed during inference or linear evaluation.
+    """
     def __init__(self):
         super(Identity, self).__init__()
+
     def forward(self, x):
+        """
+        Forward pass that returns the input without any modification.
+
+        Args:
+            x (torch.Tensor): Any input tensor.
+
+        Returns:
+            torch.Tensor: Same as input.
+        """
         return x
 
 
-# classifier
+# -------------------------------------------------------------------------
+# Linear Evaluation Model
+# -------------------------------------------------------------------------
 class LinearEvaluation(nn.Module):
+    """
+    Wraps a pretrained SiCoVa model and adds a linear classifier on top 
+    for downstream classification tasks.
+    """
+
     def __init__(self, model, nu_classes):
+        """
+        Args:
+            model (SiCoVaNet): The pretrained SiCoVa model.
+            nu_classes (int): Number of classes for the linear classifier.
+        """
         super().__init__()
-        vicreg = model
-        vicreg.linear_eval = True
-        vicreg.projector = Identity()
-        self.vicreg = vicreg
-        for param in self.vicreg.parameters():
+        SiCoVa = model
+
+        # Indicate a linear evaluation mode (optional flag)
+        SiCoVa.linear_eval = True
+
+        # Replace the SiCoVa's 'projector' (expander) with an Identity
+        # if you only want to use the encoder's outputs for classification
+        SiCoVa.projector = Identity()
+
+        # Store and freeze the main SiCoVa model
+        self.SiCoVa = SiCoVa
+        for param in self.SiCoVa.parameters():
             param.requires_grad = False
+
+        # Add a new linear classifier on top of ResNet's 2048-dim output
         self.linear = nn.Linear(2048, nu_classes)
 
-
     def forward(self, x):
-        t = self.vicreg.encoder(x)
-#         print(t.shape, type(t), len(t))
-#         encoding, _ = self.barlowTwins(x)
+        """
+        Forward pass for classification.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, 3, height, width].
+
+        Returns:
+            torch.Tensor: Logits of shape [batch_size, nu_classes].
+        """
+        # Pass input through SiCoVa's encoder
+        t = self.SiCoVa.encoder(x)
         t = torch.squeeze(t)
-#         print(t.shape, type(t), len(t))
+        # Classification layer
         pred = self.linear(t)
         return pred
 
-model = VICRegNet()
-vicreg_model=model.to(DEVICE)
-vicreg_model.load_state_dict(torch.load('/home/s13mchop/HybridML/experiments/pretrain/VR1/VICReg_resnet50_200')) #load_tar
-eval_model = LinearEvaluation(vicreg_model, nu_classes).to(DEVICE)
+
+# -------------------------------------------------------------------------
+# Instantiate and Load Pretrained Model
+# -------------------------------------------------------------------------
+model = SiCoVaNet().to(DEVICE)
+model_ckpt = "/home/s13mchop/HybridML/experiments/pretrain/VR1/SiCoVa_resnet50_200"
+model.load_state_dict(torch.load(model_ckpt))
+print(f"Loaded pretrained model from: {model_ckpt}")
+
+eval_model = LinearEvaluation(model, nu_classes).to(DEVICE)
 criterion_eval = nn.CrossEntropyLoss().to(DEVICE)
 optimizer_eval = torch.optim.SGD(eval_model.parameters(), lr=0.003, momentum=0.9, weight_decay=1e-4)
 scheduler_eval = optim.lr_scheduler.CosineAnnealingLR(optimizer_eval, T_max=1000)
 
+print("Model architecture:")
 print(eval_model)
 
-cntr=0
+# Example of freezing certain children layers
+cntr = 0
 for child in eval_model.children():
-    cntr+=1
+    cntr += 1
     print(child)
 
-eval_model.children()
-
-#Linear_Evaluation
+# Freeze SiCoVa model parameters while allowing the linear layer to train
 ct = 0
 for child in eval_model.children():
     ct += 1
-    if ct < 2:
+    if ct < 2:  # typically the first child is the SiCoVa portion
         for param in child.parameters():
             param.requires_grad = False
 
 
-epochs = 201
-for epoch in range(epochs):
-    accuracies = list()
-    class_losses = list()
-    eval_model.train()
-    for class_batch in tqdm(train_dl):
-        x, y = class_batch
-        x = x.to(DEVICE)
-        y = y.to(DEVICE)
-        logit = eval_model(x)
-        classification_loss = criterion_eval(logit, y)
-        class_losses.append(classification_loss.item())
+# -------------------------------------------------------------------------
+# Training Loop for Linear Evaluation
+# -------------------------------------------------------------------------
+def train_linear_evaluation(
+    model,
+    criterion,
+    optimizer,
+    scheduler,
+    train_loader,
+    valid_loader,
+    epochs=201,
+    device=DEVICE,
+    checkpoint_step=20,
+    checkpoint_prefix="VR1_SiCoVa_Downstream"
+):
+    """
+    Train the linear classifier on top of the pretrained SiCoVa encoder.
 
-        optimizer_eval.zero_grad()
-        classification_loss.backward()
-        optimizer_eval.step()
-        accuracies.append(y.eq(logit.detach().argmax(dim =1)).float().mean())
-    scheduler_eval.step()
-    if (epoch+1)%20==0:
-        torch.save(eval_model.state_dict(), f'VR1_VICReg_Downstream_{epoch+1}')
-        print(f"saved checkpoint for epoch {epoch + 1}")
+    Args:
+        model (nn.Module): The linear evaluation model (includes encoder + linear head).
+        criterion (nn.Module): Loss function (e.g., CrossEntropy).
+        optimizer (torch.optim.Optimizer): Optimizer for the linear head.
+        scheduler (torch.optim.lr_scheduler._LRScheduler): Learning rate scheduler.
+        train_loader (DataLoader): DataLoader for training dataset.
+        valid_loader (DataLoader): DataLoader for validation dataset.
+        epochs (int): Number of training epochs. Default is 201.
+        device (torch.device): Device to use ('cpu' or 'cuda'). Default is DEVICE.
+        checkpoint_step (int): Save model checkpoint every this many epochs. Default is 20.
+        checkpoint_prefix (str): Filename prefix for saved checkpoints. Default is 'VR1_SiCoVa_Downstream'.
 
-    print(f'Epoch {epoch + 1}')
-    print(f'classification training loss: {torch.tensor(class_losses).mean():.5f}')
-    print(f'classification training accuracy: {torch.tensor(accuracies).mean():.5f}',
-          end ='\n\n')
+    Returns:
+        None
+    """
+    for epoch in range(epochs):
+        # Training
+        model.train()
+        train_accuracies = []
+        train_losses = []
+        for x, y in tqdm(train_loader, desc=f"Training Epoch {epoch+1}"):
+            x, y = x.to(device), y.to(device)
+            logits = model(x)
+            loss = criterion(logits, y)
+            train_losses.append(loss.item())
 
-    for class_batch in tqdm(valid_dl):
-        x, y = class_batch
-        x = x.to(DEVICE)
-        y = y.to(DEVICE)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        logit = eval_model(x)
+            acc = y.eq(logits.detach().argmax(dim=1)).float().mean()
+            train_accuracies.append(acc)
 
-        classification_loss = criterion_eval(logit, y)
-        class_losses.append(classification_loss.item())
+        scheduler.step()
 
-        optimizer_eval.zero_grad()
-        classification_loss.backward()
-        optimizer_eval.step()
-        accuracies.append(y.eq(logit.detach().argmax(dim =1)).float().mean())
-    scheduler_eval.step()
+        # Checkpointing
+        if (epoch + 1) % checkpoint_step == 0:
+            ckpt_path = f"{checkpoint_prefix}_{epoch+1}"
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"Saved checkpoint at epoch {epoch + 1}: {ckpt_path}")
 
-    print(f'Epoch {epoch + 1}')
-    print(f'classification valid loss: {torch.tensor(class_losses).mean():.5f}')
-    print(f'classification valid accuracy: {torch.tensor(accuracies).mean():.5f}',
-          end ='\n\n')
+        print(f"[Epoch {epoch+1} / {epochs}]")
+        print(f" -> Training loss: {torch.tensor(train_losses).mean():.5f}")
+        print(f" -> Training accuracy: {torch.tensor(train_accuracies).mean():.5f}\n")
 
-    
+        # Validation
+        model.eval()
+        val_accuracies = []
+        val_losses = []
+        with torch.no_grad():
+            for x, y in tqdm(valid_loader, desc=f"Validation Epoch {epoch+1}"):
+                x, y = x.to(device), y.to(device)
+                logits = model(x)
+                loss = criterion(logits, y)
+                val_losses.append(loss.item())
 
-# eval_model.load_state_dict(torch.load('VR1_VICReg_Downstream_90'))    
-# correct = 0
-# total = 0
-# preds = []
-# labels = []
-# with torch.no_grad():
-#     for i, element in enumerate(tqdm(valid_dl)):
-#         image, label = element
-#         image = image.to(DEVICE)
-#         label = label.to(DEVICE)
-#         print('lables',label.shape)
-#         outputs = eval_model(image)
-#         _, predicted = torch.max(outputs.data, 1)
-#         preds += predicted.cpu().numpy().tolist()
-#         labels += label.cpu().numpy().tolist()
-#         total += label.size(0)
-#         correct += (predicted == label).sum().item()
+                acc = y.eq(logits.detach().argmax(dim=1)).float().mean()
+                val_accuracies.append(acc)
 
-# print(f'Accuracy: {100 * correct / total} %')
-
-# target_names=["ADI", "BACK", "DEB", "LYM", "MUC", "MUS", "NORM", "STR", "TUM"]
-# # labels=['0','1','2','3','4']
-
-# print(classification_report(labels, preds, target_names=target_names))
-
-# print(cohen_kappa_score(labels, preds, weights='quadratic'))
-
-#Top-5
-# correct = 0
-# total = 0
-# preds = []
-# labels = []
-# with torch.no_grad():
-#     for i, element in enumerate(tqdm(valid_dl)):
-#         k=5
-#         image, label = element
-#         image = image.to(DEVICE)
-#         label = label.to(DEVICE)
-#         batch_size = label.size(0)
-#         print('labels',label.shape)
-#         outputs = eval_model(image)
-#         _, pred = outputs.topk(k=k, dim=1)
-#         pred = pred.t()
-#         correct = pred.eq(label.view(1, -1).expand_as(pred))
-#         correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-
-# print(f'Accuracy: {correct_k.mul_(100.0 / batch_size).item()}')
+        scheduler.step()
+        print(f"[Epoch {epoch+1} / {epochs}]")
+        print(f" -> Validation loss: {torch.tensor(val_losses).mean():.5f}")
+        print(f" -> Validation accuracy: {torch.tensor(val_accuracies).mean():.5f}\n")
 
 
+# -------------------------------------------------------------------------
+# Run Training
+# -------------------------------------------------------------------------
+if __name__ == "__main__":
+    train_linear_evaluation(
+        model=eval_model,
+        criterion=criterion_eval,
+        optimizer=optimizer_eval,
+        scheduler=scheduler_eval,
+        train_loader=train_dl,
+        valid_loader=valid_dl,
+        epochs=201,
+        device=DEVICE,
+        checkpoint_step=20,
+        checkpoint_prefix="VR1_SiCoVa_Downstream"
+    )
 
+    # Uncomment to evaluate final performance or load a saved checkpoint:
+    # eval_model.load_state_dict(torch.load('VR1_SiCoVa_Downstream_90'))
+    # correct = 0
+    # total = 0
+    # preds = []
+    # labels = []
+    # with torch.no_grad():
+    #     for i, element in enumerate(tqdm(valid_dl)):
+    #         image, label = element
+    #         image = image.to(DEVICE)
+    #         label = label.to(DEVICE)
+    #         outputs = eval_model(image)
+    #         _, predicted = torch.max(outputs.data, 1)
+    #         preds += predicted.cpu().numpy().tolist()
+    #         labels += label.cpu().numpy().tolist()
+    #         total += label.size(0)
+    #         correct += (predicted == label).sum().item()
 
+    # print(f"Accuracy: {100 * correct / total:.2f}%")
 
+    # target_names = ["Class0", "Class1", "Class2", "Class3", "Class4"]
+    # print(classification_report(labels, preds, target_names=target_names))
+    # print(cohen_kappa_score(labels, preds, weights='quadratic'))
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    # # Example of top-5 evaluation
+    # correct_k = 0
+    # total_k = 0
+    # with torch.no_grad():
+    #     for i, element in enumerate(tqdm(valid_dl)):
+    #         k = 5
+    #         image, label = element
+    #         image = image.to(DEVICE)
+    #         label = label.to(DEVICE)
+    #         batch_size = label.size(0)
+    #         outputs = eval_model(image)
+    #         _, pred = outputs.topk(k=k, dim=1)
+    #         pred = pred.t()
+    #         correct = pred.eq(label.view(1, -1).expand_as(pred))
+    #         correct_k += correct[:k].reshape(-1).float().sum(0, keepdim=True)
+    #         total_k += batch_size
+    # print(f"Top-5 Accuracy: {correct_k.mul_(100.0 / total_k).item():.2f}%")

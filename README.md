@@ -1,7 +1,20 @@
-# SiCoVa: Self-Informed Cross-Correlation for Variance and Invariance in medical representation learning
+# SiCoVa: Self-Supervised Learning with Cross-Correlation Regularization
 
-This repository contains code and resources for a deep learning workflow involving pretraining, linear evaluation, and fine-tuning using SiCoVa with a ResNet-50 backbone. The pretraining is done on EyePacs dataset. The target datasets used are Messidor-2, APTOS-19 and Ocular Toxoplasmosis Fundus Images Dataset
+This repository implements **SiCoVa** (Self-Supervised Learning with Variance-Invariance-Covariance and Cross-Correlation Regularization), extending the existing VICReg framework with an additional **cross-correlation regularization** term. SiCoVa supports self-supervised pretraining, linear evaluation, and fine-tuning on downstream classification tasks. The implementation uses **PyTorch** and **Torchvision**, featuring a ResNet50 backbone, MLP projector, and linear classifier.
 
+## Features
+
+- **SiCoVa Implementation**:
+  - ResNet50 encoder with an MLP expander for self-supervised learning.
+  - Additional **cross-correlation regularization** term for improved representation learning.
+- **Linear Evaluation**:
+  - Freezes the pretrained encoder and trains a linear classification layer.
+- **Fine-Tuning**:
+  - Option to unfreeze parts of the encoder for end-to-end optimization.
+- **Training and Validation**:
+  - Configurable training loop with support for checkpointing and detailed metrics.
+- **Top-k Accuracy**:
+  - Evaluate classification performance using top-1 or top-k metrics.
 ![](image.png)
 ---
 
@@ -62,3 +75,10 @@ Includes resources for fine-tuning the pretrained model on a downstream task.
 pip install -r requirements.txt
 ```
 
+## License
+
+This project is licensed under the MIT License. See the `LICENSE` file for details.
+
+---
+
+Happy training! 🚀
